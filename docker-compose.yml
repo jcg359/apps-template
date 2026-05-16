@@ -1,0 +1,25 @@
+# Local container testing. Day-to-day dev runs `npm run dev` directly;
+# use this when you want to validate the production container locally.
+#
+#   docker compose up --build
+#   curl http://localhost:3000/api/health
+
+services:
+  shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP: shell
+    image: apps-template/shell:local
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      AUTH_SECRET: ${AUTH_SECRET:-dev-only-not-for-production}
+      AUTH_MICROSOFT_ENTRA_ID_ID: ${AUTH_MICROSOFT_ENTRA_ID_ID:-}
+      AUTH_MICROSOFT_ENTRA_ID_SECRET: ${AUTH_MICROSOFT_ENTRA_ID_SECRET:-}
+      AUTH_MICROSOFT_ENTRA_ID_ISSUER: ${AUTH_MICROSOFT_ENTRA_ID_ISSUER:-}
+      REDIS_URL: ${REDIS_URL:-}
+    restart: unless-stopped
