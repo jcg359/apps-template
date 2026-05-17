@@ -11,6 +11,7 @@ This is a Turborepo monorepo for a composite SPA app suite. Everything serves fr
 | Add a new sub-app or sub-app backend | **[`docs/adding-a-sub-app.md`](./docs/adding-a-sub-app.md)** — end-to-end recipe: scaffold → catalog → nginx → Docker → verify → deploy |
 | Push to Azure Container Apps, change ingress, wire env vars, attach a custom domain | **[`docs/deployment.md`](./docs/deployment.md)** — one-time setup, per-deploy commands, adding a sub-app to a live deployment |
 | Just need the per-container build commands or runtime topology | **[`docker/README.md`](./docker/README.md)** — quick cheat-sheet |
+| Work on the access-manager sub-app (screens, components, data flow, aesthetic conventions) | **[`apps/access-manager/README.md`](./apps/access-manager/README.md)** — what's built, boot flow, the active-revision concept, screen-to-endpoint map, primitives, how to add a new screen. The API contract it implements is in **[`apps/access-manager/docs/API.md`](./apps/access-manager/docs/API.md)** |
 
 **Adding a sub-app, changing auth, or touching routing is cross-cutting** — review `architecture.md` §1–§4 before scaffolding anything, even if the recipe in `adding-a-sub-app.md` looks self-contained.
 
