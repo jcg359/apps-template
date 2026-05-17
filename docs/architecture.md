@@ -32,14 +32,56 @@ The Microsoft Entra app registration being shared across apps is an ergonomic co
 
 `SKIP_AUTH=1` in dev disables the proxy entirely so the UI can be previewed without Entra credentials. Hard-gated to `NODE_ENV !== 'production'` in `apps/shell/src/proxy.ts` — the flag is inert in production builds even if someone sets it.
 
-## 3. Sub-app distribution — three live paths, one future path
+### What `/api/session` looks like in practice
+
+Sub-apps on the BFF path call one endpoint on the shell that translates the cookie into user info:
+
+- Route: `apps/shell/src/app/api/session/route.ts`
+- Calls `auth()` (NextAuth), returns `{ user: { email, name, image } }` as JSON
+- Same-origin via shell rewrites means the browser auto-attaches the cookie; the SPA never sees Entra and never holds a token
+- Never return access/ID tokens to the SPA. If the SPA needs to call other backends, those backends validate the cookie themselves (or the shell mints short-lived tokens via a separate endpoint)
+
+**Not yet built.** The first sub-app on the BFF path is the triggering consumer (see §10).
+
+**First-paint optimization for in-monorepo SPAs.** If the shell is serving the SPA's HTML directly (see §9 option 1), inject the user into the initial HTML server-side to avoid the boot-time fetch:
+
+```ts
+// apps/shell/src/app/myapp/[[...path]]/route.ts
+const session = await auth();
+const html = await readFile('public/myapp/index.html', 'utf8');
+return new Response(
+  html.replace('</head>', `<script>window.__USER__=${JSON.stringify(session?.user ?? null)}</script></head>`),
+  { headers: { 'content-type': 'text/html' } }
+);
+```
+
+`/api/session` is still required for refresh/expiry/post-boot reads — this just skips the round-trip on first paint.
+
+## 3. Sub-app distribution — four live paths, one future path
+
+### When to split into a sub-app at all
+
+The composite pattern earns its keep at the **cross-repo** boundary — that's the case the architecture is shaped around. For work inside this monorepo using Next.js, splitting a section off into `apps/<name>/` adds inter-process overhead (separate dev server, full-page cross-app navigation per §5, no shared React state) without adding capability. Use the split only when one of these triggers fires:
+
+- Independent deploy cadence (deploy app A without redeploying shell)
+- Independent ownership / smaller blast radius on regressions
+- Independent dependency versions
+- Build-time isolation as the codebase grows
+- The sub-app needs a different framework (React SPA, future non-React)
+
+Otherwise, prefer **routes inside `apps/shell/`** — route groups (`app/(dashboard)/`, `app/(admin)/`), shared `packages/ui`, one dev server, client-side navigation between sections. Nothing in this layout blocks promoting a section to its own `apps/<name>/` later; the rewrite scaffolding and `packages/ui` are already in place.
+
+### The shapes
 
 | Sub-app shape | Where it lives | How it gets `@repo/*` | Auth |
 |---|---|---|---|
 | Next.js | This monorepo as `apps/<name>/` | Workspace dep, imports source | Shared `AUTH_SECRET` |
 | Next.js, separate repo *(future, if needed)* | External | npm install from git URL (`"@repo/ui": "github:org/apps-template#sha"`) | Shared `AUTH_SECRET` |
+| React SPA | This monorepo as `apps/<name>/` | Workspace dep, imports source (blocked on `UIProvider` refactor) | BFF — fetch `/api/session` |
 | React SPA, separate repo | External | **Git subtree** of `packages/ui/src/` | BFF — fetch `/api/session` |
 | Non-React *(future, when a consumer appears)* | External | **Web Components** from `packages/ui-elements/` (not yet built) | BFF — WC fetches `/api/session` itself |
+
+The in-monorepo SPA row is the right pick when: you want a non-Next framework (Vite + React) but don't yet need a separate repo, *and* you accept the `UIProvider` refactor as the unblocking prerequisite for using `@repo/ui`. Hosting options for this shape live in §9.
 
 ### The cross-repo decision: subtree now, Web Components later
 
@@ -115,6 +157,18 @@ These caught us during scaffolding and aren't obvious from the code:
 ## 9. Containerization
 
 Both a root `Dockerfile` (monorepo-aware, parameterized by `APP` build-arg, uses `turbo prune --docker`) and a per-app `apps/shell/Dockerfile` (same pattern hard-coded to `shell`) exist. Day-to-day dev runs `npm run dev` directly — Docker is only for production-build validation and deployment. `docker-compose.yml` wires the shell up for local container smoke tests.
+
+### Hosting an in-monorepo SPA
+
+An SPA in `apps/<name>/` is just a static bundle after build. The load-bearing constraint (§1): the SPA must be reachable **through the shell origin** (`shell.example.com/myapp/*`), not on a different public origin. Different origin = cookie not scoped = OAuth round-trips on every navigation = the architecture's whole reason for existing is defeated.
+
+Three options, in order of operational complexity:
+
+1. **Bundle into the shell container.** Build the SPA in the same Docker stage, ship its `dist/` inside the shell image (e.g. under `apps/shell/public/myapp/`, or behind a Next route handler that does SPA fallback and can also do the first-paint user injection from §2). One container, one deploy. Loses independent deploy cadence — fine if you don't need it.
+2. **Separate static container, shell rewrites to it.** Tiny nginx/caddy container hosts the bundle on an internal port; uncomment the rewrite stub in `apps/shell/next.config.ts` to proxy `/myapp/*` to it. Two containers in `docker-compose.yml`. Independent deploy.
+3. **Static hosting elsewhere** (S3+CloudFront, Cloudflare Pages, etc.). Push the bundle, shell rewrites to its URL. CDN edge for free, nothing to operate.
+
+Default to (1) until a real reason to graduate appears.
 
 ## 10. Forward-looking decisions (when to revisit)
 

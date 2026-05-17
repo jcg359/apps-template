@@ -4,7 +4,9 @@ This is a Turborepo monorepo for a composite/microfrontend app platform. The she
 
 ## Before changing anything cross-cutting, read
 
-**[`docs/architecture.md`](./docs/architecture.md)** — the decisions and constraints behind the composite app pattern, the auth model, how sub-apps distribute, the subtree + Web Components plan, and what was explicitly ruled out. These aren't visible from the code alone.
+**[`docs/architecture.md`](./docs/architecture.md)** — the decisions and constraints behind the composite app pattern, the auth model, **when to split into a sub-app at all vs. just adding routes to the shell** (§3), the four live sub-app shapes including in-monorepo SPA, hosting options for in-monorepo SPAs (§9), the concrete shape of the BFF `/api/session` endpoint (§2), the subtree + Web Components plan, and what was explicitly ruled out. These aren't visible from the code alone.
+
+**Adding a new sub-app is a cross-cutting decision** — review §3 (shape) and §9 (hosting, if SPA) before scaffolding anything.
 
 ## Quick map
 
