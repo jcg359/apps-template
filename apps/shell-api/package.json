@@ -1,0 +1,12 @@
+{
+  "name": "shell-api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "build": "echo 'no build step for python' && exit 0",
+    "lint": "command -v ruff >/dev/null 2>&1 && ruff check app || echo 'ruff not installed; skip (pip install -e .[dev])'",
+    "typecheck": "command -v mypy >/dev/null 2>&1 && mypy app || echo 'mypy not installed; skip (pip install -e .[dev])'",
+    "clean": "rm -rf .turbo __pycache__ .mypy_cache .ruff_cache"
+  }
+}

@@ -1,0 +1,161 @@
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import '@repo/design-tokens/tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* — Typography overrides for access-manager — */
+  --font-display: 'Newsreader', ui-serif, Georgia, serif;
+  --font-sans-am: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono-am: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* — Ink & paper palette — */
+  --ink-900: #0c0c0d;
+  --ink-800: #1a1a1c;
+  --ink-700: #2a2a2d;
+  --ink-600: #44444a;
+  --ink-500: #6b6b73;
+  --ink-400: #9a9aa1;
+  --ink-300: #c4c4c9;
+  --ink-200: #e2e2e5;
+  --ink-100: #ededef;
+  --ink-50:  #f5f5f4;
+  --paper:   #fafaf7;
+  --paper-elevated: #ffffff;
+
+  /* — The one accent: desaturated ink-blue, used only for "pending" state — */
+  --accent-pending: #2f3f5e;
+  --accent-pending-soft: #e6ebf3;
+  --accent-pending-line: #c5d0e2;
+
+  /* — Semantic muted statuses — */
+  --status-applied: #4d5347;
+  --status-discarded: #8a857a;
+  --status-impersonation: #6b4226;
+  --status-impersonation-soft: #f1e7dc;
+
+  /* — Hairline weight — */
+  --rule: 1px;
+  --rule-color: var(--ink-200);
+  --rule-color-strong: var(--ink-300);
+}
+
+html,
+body {
+  font-family: var(--font-sans-am);
+  background-color: var(--paper);
+  color: var(--ink-900);
+  font-feature-settings: 'ss01', 'ss02', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background-image:
+    radial-gradient(circle at 1px 1px, var(--ink-100) 1px, transparent 0);
+  background-size: 64px 64px;
+  background-position: 0 0;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* — Display headings use the serif — */
+.font-display {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  letter-spacing: -0.012em;
+}
+
+.font-mono {
+  font-family: var(--font-mono-am);
+  font-feature-settings: 'zero', 'ss01';
+}
+
+/* — Tabular numerics everywhere by default for our table cells — */
+.tabnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* — Hairline ledger rule — */
+.rule-t { border-top: var(--rule) solid var(--rule-color); }
+.rule-b { border-bottom: var(--rule) solid var(--rule-color); }
+.rule-r { border-right: var(--rule) solid var(--rule-color); }
+.rule-l { border-left: var(--rule) solid var(--rule-color); }
+
+.rule-t-strong { border-top: var(--rule) solid var(--rule-color-strong); }
+.rule-b-strong { border-bottom: var(--rule) solid var(--rule-color-strong); }
+
+/* — Section number badges (§1 §2 …) — */
+.section-numeral {
+  font-family: var(--font-display);
+  font-style: italic;
+  color: var(--ink-400);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* — Accent ribbon for impersonation banner — */
+@keyframes ribbon-drift {
+  from { background-position: 0 0; }
+  to   { background-position: 24px 0; }
+}
+.impersonation-ribbon {
+  background:
+    repeating-linear-gradient(
+      135deg,
+      var(--status-impersonation-soft) 0 8px,
+      transparent 8px 16px
+    );
+  animation: ribbon-drift 6s linear infinite;
+}
+
+/* — Staggered page-load reveal — */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.reveal { animation: fade-up 380ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.reveal-1 { animation-delay: 40ms; }
+.reveal-2 { animation-delay: 110ms; }
+.reveal-3 { animation-delay: 200ms; }
+.reveal-4 { animation-delay: 290ms; }
+
+/* — Pending diff slide-in — */
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: none; }
+}
+.slide-in-right { animation: slide-in-right 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* — Ledger row hover — */
+.ledger-row {
+  transition: background-color 120ms ease;
+}
+.ledger-row:hover {
+  background-color: var(--ink-50);
+}
+
+/* — Focus ring (subtle, ink-blue) — */
+*:focus-visible {
+  outline: 2px solid var(--accent-pending);
+  outline-offset: 2px;
+}
+
+/* — Selection — */
+::selection {
+  background: var(--ink-900);
+  color: var(--paper);
+}
+
+/* — Scrollbar (subtle) — */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-300) transparent;
+}

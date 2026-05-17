@@ -1,0 +1,11 @@
+:80 {
+    root * /srv
+    encode gzip
+
+    # Vite was built with base: '/apps/access-manager/'.
+    # Strip the prefix so Caddy can serve /index.html and /assets/* directly.
+    uri strip_prefix /apps/access-manager
+
+    try_files {path} /index.html
+    file_server
+}
