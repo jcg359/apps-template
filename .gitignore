@@ -42,4 +42,4 @@ coverage/
 next-env.d.ts
 
 # Local Claude settings
-.claude
+.claude/

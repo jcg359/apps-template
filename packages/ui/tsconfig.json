@@ -1,9 +1,9 @@
 {
-  "extends": "@repo/tsconfig/nextjs.json",
+  "extends": "@repo/tsconfig/react.json",
   "compilerOptions": {
     "rootDir": "src",
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tailwind.config.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["node_modules", "dist", ".turbo"]
 }

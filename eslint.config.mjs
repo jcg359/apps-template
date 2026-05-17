@@ -4,12 +4,10 @@ export default [
   {
     ignores: [
       '**/node_modules/**',
-      '**/.next/**',
       '**/.turbo/**',
       '**/dist/**',
       '**/build/**',
       '**/coverage/**',
-      '**/next-env.d.ts',
     ],
   },
   js.configs.recommended,
@@ -27,6 +25,12 @@ export default [
         require: 'readonly',
         exports: 'writable',
         global: 'readonly',
+        window: 'readonly',
+        document: 'readonly',
+        navigator: 'readonly',
+        sessionStorage: 'readonly',
+        localStorage: 'readonly',
+        fetch: 'readonly',
       },
     },
     rules: {

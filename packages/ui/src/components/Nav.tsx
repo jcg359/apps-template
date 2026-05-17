@@ -1,7 +1,4 @@
-'use client';
-
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { useUI } from '../provider';
 
 export interface NavLink {
   label: string;
@@ -12,13 +9,13 @@ export interface NavProps {
   links: NavLink[];
 }
 
-function isActive(pathname: string | null, href: string): boolean {
-  if (!pathname) return false;
+function isActive(pathname: string, href: string): boolean {
   if (href === '/') return pathname === '/';
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
 export function Nav({ links }: NavProps) {
+  const { Link, usePathname } = useUI();
   const pathname = usePathname();
   return (
     <nav aria-label="Primary" className="flex items-center gap-2">

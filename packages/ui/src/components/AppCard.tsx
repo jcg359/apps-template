@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { useUI } from '../provider';
 
 export interface AppDefinition {
   id: string;
@@ -17,6 +17,7 @@ function initial(name: string): string {
 }
 
 export function AppCard({ app }: AppCardProps) {
+  const { Link } = useUI();
   return (
     <Link
       href={app.href}

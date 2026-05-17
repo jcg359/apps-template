@@ -13,5 +13,5 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true
   },
-  "exclude": ["node_modules", ".turbo", "dist", ".next"]
+  "exclude": ["node_modules", ".turbo", "dist"]
 }

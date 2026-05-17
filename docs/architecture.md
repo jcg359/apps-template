@@ -1,178 +1,159 @@
-# Composite app architecture
+# Composite SPA architecture
 
-This document captures the architectural decisions behind this monorepo that aren't directly visible from the code. Read this before making changes that touch cross-app navigation, auth, or how external apps consume `@repo/*` packages.
+This document captures the architectural decisions behind this monorepo that aren't directly visible from the code. Read this before making changes that touch routing, auth, or how external apps consume `@repo/*` packages.
 
-## 1. The composite app pattern
+> **Note:** an earlier iteration of this architecture used a Next.js shell with NextAuth/BFF mediation. That model was replaced wholesale before any production use. Git history holds the previous version; nothing in the current code or this document refers back to it.
 
-The shell (`apps/shell`) owns:
+## 1. The pattern
 
-- The user's URL space (`shell.example.com/*`)
-- Authentication — the only thing that talks to Microsoft Entra ID
-- Navigation chrome (header, app launcher, app-selector landing page)
-- Routing decisions (which path prefix goes to which sub-app)
+Everything is served from a single origin (`shell.example.com`) by a public **nginx** container. nginx fans out path-based:
 
-Sub-apps mount under path prefixes via shell rewrites in `apps/shell/next.config.ts`. **From the browser's perspective everything is one origin** — the shell domain. Cross-app routing is a server-side rewrite.
+- `/` and other shell routes → shell SPA
+- `/auth-client-redirect` → shell SPA (MSAL redirect handler)
+- `/apps/<name>/*` → that sub-app SPA
+- `/api/whoami`, `/api/apps`, `/api/health` → Python shell-api
+- `/api/<name>/*` → that sub-app's backend (when one exists)
 
-### Why same-origin matters (the load-bearing property)
+**No Node process in the request path. No SSR. No middleware tier.** The shell is just another SPA — its specialness is that it owns the launcher chrome and `/auth-client-redirect`.
 
-The NextAuth session cookie is scoped to an origin, not to the OAuth client. Same-origin means the cookie is automatically sent on every cross-app navigation — **no re-auth round-trips, no SSO redirect on "back" navigation.** This is the constraint that drove the entire architecture.
+### Why single origin matters (the load-bearing property)
 
-The Microsoft Entra app registration being shared across apps is an ergonomic convenience (one set of redirect URIs to manage), **not** what enables SSO. Cookie scope is.
+All SPAs run on the same browser origin. That means:
+
+- `sessionStorage` is shared across SPAs in the same tab — once one app authenticates, the others read the tokens for free
+- Same-origin fetch on `/api/*` and `/apps/<name>/*` "just works" — no CORS plumbing
+- One Entra redirect URI covers the entire suite
+
+If sub-apps moved to per-app subdomains, all of this regresses. **Don't.**
 
 ## 2. Auth model
 
-- **Single Entra app registration** for the platform. Only the shell needs a redirect URI registered.
-- **Shell is the only thing that talks to Entra.** Sub-apps never initiate OAuth flows.
-- **Shell sets the session cookie** via NextAuth v5 (`apps/shell/src/auth.ts`). Encrypted with `AUTH_SECRET`.
-- **Two ways sub-apps validate that cookie**:
-  1. **Shared `AUTH_SECRET`** (Next.js sub-apps) — decrypt the JWT directly. Zero network hop.
-  2. **BFF call** (React SPAs and other non-Next sub-apps) — `fetch('/api/session')` against the shell. Same-origin from the browser's POV because of shell rewrites, so the cookie is attached automatically.
+**MSAL.js (`@azure/msal-browser`)** runs in every SPA. Wrapped by a thin library in `packages/auth` so all SPAs use identical config (clientId, authority, redirect URI, cache type).
 
-### Dev bypass
+### Entra registration
 
-`SKIP_AUTH=1` in dev disables the proxy entirely so the UI can be previewed without Entra credentials. Hard-gated to `NODE_ENV !== 'production'` in `apps/shell/src/proxy.ts` — the flag is inert in production builds even if someone sets it.
+- Platform: **SPA** (not Web — no client secret, PKCE in the browser)
+- Single redirect URI: `https://shell.example.com/auth-client-redirect` (one entry, all sub-apps share)
+- Scopes registered for the first-party APIs the suite calls
+- Dev redirect URI: whatever the local nginx exposes (e.g. `http://localhost:8080/auth-client-redirect`)
 
-### What `/api/session` looks like in practice
+### Flow
 
-Sub-apps on the BFF path call one endpoint on the shell that translates the cookie into user info:
+1. Sub-app boots, calls `auth.acquireTokenSilent({ scopes })`.
+2. Cache hit (same tab) or silent SSO via Entra's session cookie (hidden iframe, fast, invisible) → token in hand, sub-app proceeds.
+3. Silent fails (no Entra session, MFA, consent prompt) → sub-app calls `auth.login({ returnTo: window.location.href })`. Library puts `returnTo` into MSAL's `state` param and triggers redirect.
+4. Entra → `shell.example.com/auth-client-redirect?code=...&state=...`.
+5. Shell SPA's callback route runs `msal.handleRedirectPromise()`. MSAL exchanges the code for tokens, writes them to `sessionStorage`.
+6. Callback reads `returnTo` from state, calls `window.location.replace(returnTo)`.
+7. Sub-app reloads. MSAL cache (same origin, same tab) has the tokens. Sub-app reads them, proceeds.
 
-- Route: `apps/shell/src/app/api/session/route.ts`
-- Calls `auth()` (NextAuth), returns `{ user: { email, name, image } }` as JSON
-- Same-origin via shell rewrites means the browser auto-attaches the cookie; the SPA never sees Entra and never holds a token
-- Never return access/ID tokens to the SPA. If the SPA needs to call other backends, those backends validate the cookie themselves (or the shell mints short-lived tokens via a separate endpoint)
+### Token storage
 
-**Not yet built.** The first sub-app on the BFF path is the triggering consumer (see §10).
+`sessionStorage`. Per-tab. Shared across all SPAs on this origin within that tab. Fresh tabs do their own silent SSO on boot (cheap, invisible if Entra session is live).
 
-**First-paint optimization for in-monorepo SPAs.** If the shell is serving the SPA's HTML directly (see §9 option 1), inject the user into the initial HTML server-side to avoid the boot-time fetch:
+This is an internal app suite; in-browser token storage is an accepted tradeoff in exchange for keeping the shell out of every API call's hot path. See §9.
 
-```ts
-// apps/shell/src/app/myapp/[[...path]]/route.ts
-const session = await auth();
-const html = await readFile('public/myapp/index.html', 'utf8');
-return new Response(
-  html.replace('</head>', `<script>window.__USER__=${JSON.stringify(session?.user ?? null)}</script></head>`),
-  { headers: { 'content-type': 'text/html' } }
-);
-```
+### Token usage
 
-`/api/session` is still required for refresh/expiry/post-boot reads — this just skips the round-trip on first paint.
+Every SPA attaches `Authorization: Bearer <token>` to its API calls. Every backend validates the JWT signature against Entra's JWKS (shared FastAPI dependency for Python services, equivalent helper for other languages). **No backend calls the shell to validate a token.**
 
-## 3. Sub-app distribution — four live paths, one future path
+### Shell-mediated callback (why the redirect is single-URI)
 
-### When to split into a sub-app at all
+The single `/auth-client-redirect` page on the shell:
 
-The composite pattern earns its keep at the **cross-repo** boundary — that's the case the architecture is shaped around. For work inside this monorepo using Next.js, splitting a section off into `apps/<name>/` adds inter-process overhead (separate dev server, full-page cross-app navigation per §5, no shared React state) without adding capability. Use the split only when one of these triggers fires:
+- Lets Entra hold **one** redirect URI for the whole suite — adding a sub-app needs no Entra change.
+- Lets sub-apps stay thin — they never see MSAL's redirect plumbing directly; they call `auth.login(...)` from `@repo/auth` and get bounced back to where they came from via the `returnTo` state.
 
-- Independent deploy cadence (deploy app A without redeploying shell)
-- Independent ownership / smaller blast radius on regressions
-- Independent dependency versions
-- Build-time isolation as the codebase grows
-- The sub-app needs a different framework (React SPA, future non-React)
+## 3. URL space
 
-Otherwise, prefer **routes inside `apps/shell/`** — route groups (`app/(dashboard)/`, `app/(admin)/`), shared `packages/ui`, one dev server, client-side navigation between sections. Nothing in this layout blocks promoting a section to its own `apps/<name>/` later; the rewrite scaffolding and `packages/ui` are already in place.
+| Path | Owned by | Notes |
+|---|---|---|
+| `/` | shell SPA | landing, launcher, nav chrome |
+| `/auth-client-redirect` | shell SPA | MSAL redirect handler, reads state, bounces to `returnTo` |
+| `/api/whoami` | shell-api | enriched user info (claims + Graph lookups as needed) |
+| `/api/apps` | shell-api | app catalog for the launcher (source of truth for what shows up) |
+| `/api/health` | shell-api | liveness/readiness |
+| `/apps/<name>/*` | that sub-app SPA | the sub-app's frontend |
+| `/api/<name>/*` | that sub-app's backend | the sub-app's API, if it has one |
 
-### The shapes
+## 4. Sub-app distribution
 
 | Sub-app shape | Where it lives | How it gets `@repo/*` | Auth |
 |---|---|---|---|
-| Next.js | This monorepo as `apps/<name>/` | Workspace dep, imports source | Shared `AUTH_SECRET` |
-| Next.js, separate repo *(future, if needed)* | External | npm install from git URL (`"@repo/ui": "github:org/apps-template#sha"`) | Shared `AUTH_SECRET` |
-| React SPA | This monorepo as `apps/<name>/` | Workspace dep, imports source (blocked on `UIProvider` refactor) | BFF — fetch `/api/session` |
-| React SPA, separate repo | External | **Git subtree** of `packages/ui/src/` | BFF — fetch `/api/session` |
-| Non-React *(future, when a consumer appears)* | External | **Web Components** from `packages/ui-elements/` (not yet built) | BFF — WC fetches `/api/session` itself |
+| React SPA, in monorepo | `apps/<name>/` (Vite) | Workspace dep | MSAL.js via `@repo/auth` |
+| React SPA, separate repo | External | Git subtree of `packages/ui/src/` and `packages/auth/src/` | MSAL.js via the subtree-pulled copy |
+| Non-React or zero-coupling *(future)* | External | Web Components from `packages/ui-elements/` (not built); runtime auth SDK from `shell.example.com/auth-sdk.js` (not built) | MSAL.js via the shell-hosted SDK |
 
-The in-monorepo SPA row is the right pick when: you want a non-Next framework (Vite + React) but don't yet need a separate repo, *and* you accept the `UIProvider` refactor as the unblocking prerequisite for using `@repo/ui`. Hosting options for this shape live in §9.
+Both subtree-today and SDK-later paths share the same source. Don't build the runtime SDK or the Web Components target speculatively — same posture as before. See §10.
 
-### The cross-repo decision: subtree now, Web Components later
+## 5. Repository layout
 
-For sharing UI components with apps in separate repos, the chosen approach is to support two delivery paths from the same source:
+- `apps/shell/` — Vite + React SPA. Renders launcher/nav, hosts `/auth-client-redirect`, app-selector landing.
+- `apps/shell-api/` — Python FastAPI. Owns `/api/whoami`, `/api/apps`, `/api/health`.
+- `apps/<sub-app>/` — Vite + React SPA. e.g. `apps/access-manager/`.
+- `packages/ui/` — React components consumed by every SPA. **UIProvider refactor required day 1** — Next-specific imports (`next/link`, `next/navigation`) must be removed since the shell is no longer Next.
+- `packages/auth/` — MSAL.js wrapper, shared config, login/logout helpers, token cache reader.
+- `packages/design-tokens/` — CSS custom properties + Tailwind preset. Stack-agnostic.
+- `packages/tsconfig/` — shared TypeScript presets.
+- `docker/<name>/` — Dockerfile per deployable. One subfolder per `nginx`, `shell`, `shell-api`, and each `<sub-app>`.
 
-- **Today**: React SPAs in separate repos consume `packages/ui/src/` via `git subtree pull`. They compile the source in their own build. Pinned to whatever commit they pulled. Updates are manual (a scheduled CI PR is a reasonable enhancement).
-- **When a non-React or zero-coupling consumer appears**: build `packages/ui-elements/` — a thin wrapper that takes the same React components and exposes them as custom elements (`customElements.define`). Builds to a single static JS bundle served by the shell at a stable URL. Consumers add one `<script>` tag and use HTML tags.
+## 6. Production hosting (Azure Container Apps)
 
-Both paths share the same `packages/ui` source. A bug fix flows to both. The Web Components path is **not built yet** and shouldn't be built speculatively — the cost is real (extra workspace, bundle target, hosting, runtime failure modes) and only justified by a real consumer.
+- **nginx** container: the only public ingress. Holds the routing config, terminates TLS, gzips, can cache static assets at the edge.
+- **shell, shell-api, every sub-app SPA**: internal ingress only. Reachable from nginx within the Container Apps environment via the environment's internal DNS.
+- Per-container Dockerfiles in `docker/<name>/`. Static SPA containers use **Caddy** for `try_files {path} /index.html` (SPA fallback) and asset serving.
+- No docker-compose in prod. Each container is its own Container App.
 
-#### How components get user / app-identity context in each path
+### Local dev
 
-Components occasionally need to know "who is the user" and "what app is rendering me."
+Two modes:
 
-| Concern | Subtree path | Web Component path |
-|---|---|---|
-| User identity | Consumer passes via prop or React context | Component fetches `/api/session` itself on mount (cookie attached automatically because same-origin via shell rewrite) |
-| App identity | Prop | HTML attribute |
-| Sharing React context with consumer | ✅ yes | ❌ no — props only |
-| Passing JSX children | ✅ yes | ❌ no (or via slots, awkward) |
+- **Standalone SPA** — run a single SPA's Vite dev server on its own port. Set `VITE_MOCK_USER=1` to bypass MSAL and return a stub user. Best for UI iteration; no nginx, no shell-api, no Entra round-trip.
+- **Integrated** — run nginx locally (host install or a one-off container) with the prod routing config pointed at local ports; run the Vite dev servers and the FastAPI dev server. Hit `http://localhost:8080/` and the whole composite behaves like prod. Use this when wiring real auth or cross-app navigation.
 
-Subtree is the more ergonomic match when the launcher needs to read consumer state. Web Components are the more decoupled match for truly independent embedding.
+### Vite `base` and Caddy
 
-### Prerequisite for both paths
+Each SPA's Vite config sets `base: '/apps/<name>/'` so the built `index.html` references assets at the correct prefix. Caddy serves them from `/` inside the container; nginx routes `/apps/<name>/*` to the container, preserving the prefix. SPA client-side routes fall back to `index.html` via Caddy's `try_files`.
 
-`packages/ui` currently imports `next/link` and `next/navigation` directly. Non-Next React consumers can't use these as-is. **The pending refactor is to inject `Link` and `usePathname` via a `<UIProvider>` context** — Next apps pass Next's versions, SPAs pass `react-router`'s. After this lands, subtree is immediately viable; the Web Components path becomes feasible at any time.
+## 7. Python shell-api
 
-### What was explicitly ruled out
+Day 1 surface:
+
+- `GET /api/whoami` — validates bearer, returns enriched user info
+- `GET /api/apps` — returns the app catalog for the launcher
+- `GET /api/health` — liveness/readiness
+
+Shared FastAPI dependency `Depends(verify_bearer)` validates the JWT signature against Entra's cached JWKS and returns claims. Used by every protected route.
+
+The app catalog being served from `/api/apps` (instead of a hand-coded list in the shell SPA) is **day-1 work**, not a forward-looking aspiration — the architecture doesn't have a hand-coded fallback.
+
+## 8. Component sharing
+
+`packages/ui` is React + Tailwind. Day-1 prerequisite: the **UIProvider refactor** — inject `Link` and any router/navigation hooks via a `<UIProvider>` context so the components are framework-neutral. One consumer profile (React SPA), not two.
+
+After that lands, the subtree path for external SPAs is immediately viable; the future Web Components target (`packages/ui-elements/`) becomes feasible at any time when a non-React consumer materializes.
+
+## 9. What was explicitly ruled out
 
 | Approach | Why not |
 |---|---|
-| npm registry publishing | No registry infrastructure to maintain; no version-pinning ergonomics needed for this use case |
-| Module Federation (Webpack or Vite) | Operational complexity, version-skew failure modes, runtime fragility; also incompatible with Next 16's Turbopack |
-| `file:` dep / `npm link` for dev, build artifact for prod | Fragile in CI, requires sibling-checkout discipline |
-| Iframes per sub-app | Layout/focus/scroll issues, auth-context isolation, UX feel |
-| Moving the existing sub-app into this monorepo | The sub-app already lives in its own repo; cannot be moved |
-| A shared `@repo/config` package for the apps list | Apps list is provided by the caller (see §4). A shared package would lock callers into one source of truth, which is the wrong direction given the database-backed future. |
-
-## 4. The apps list (launcher catalog)
-
-The list of apps shown in the launcher popover and on the app-selector landing page is **provided by the consuming app**. There is no `@repo/config` package and there will not be one.
-
-- **Today**: each app passes its own `AppDefinition[]` as a prop to `AppLauncherButton` and `AppCardGrid`. The shell's list lives in `apps/shell/src/config/apps.ts`.
-- **Eventually**: this list will come from a database. The component contract (caller provides the list) was designed specifically to make that swap a one-place change in each consumer — no shared package to update, no version bump to propagate.
-
-## 5. Cross-app navigation behavior
-
-Clicking a card in the launcher triggers a top-level browser navigation (`<Link href="/dashboard">`, etc.). Because everything is same-origin via shell rewrites, the navigation is a regular page load with the auth cookie attached. **No Entra round-trip, no sign-in page** — the user perceives "click and you're there."
-
-It is still a full page load. Two separate Next instances cannot share a React tree; state doesn't carry across. This is acceptable — cookie-warm page load is sub-100ms in practice. True zero-reload navigation would require module federation, which is explicitly off the table (§3).
-
-## 6. Visual language
-
-White background, grayscale palette, no bold colors. The Tailwind preset in `packages/design-tokens/src/tailwind-preset.js` still defines a `primary` color scale for future use, but components in `packages/ui` deliberately default to the neutral scale. Components are designed to look intentional in pure black/white/gray.
-
-## 7. Workspace boundaries (why each package is shaped the way it is)
-
-- **`@repo/auth`** — stack-agnostic. No React dependency. Importable by future backend services as well as Next apps. The Entra provider config (`entra.ts`) is real and consumed by the shell; `session.ts` and `middleware.ts` are typed placeholders intended to grow into real cross-service helpers when needed.
-- **`@repo/design-tokens`** — fully stack-agnostic. CSS custom properties + a Tailwind preset. No React. This is what lets a future non-React sub-app stay visually consistent.
-- **`@repo/ui`** — React + Tailwind. Currently Next-coupled via `next/link` and `next/navigation`; pending `UIProvider` refactor to remove that coupling (see §3).
-- **`@repo/tsconfig`** — shared TypeScript presets only.
-
-## 8. Next.js 16 specifics worth knowing
-
-These caught us during scaffolding and aren't obvious from the code:
-
-- `middleware.ts` was renamed to `proxy.ts`. The export must be named `proxy` (or default).
-- `experimental.typedRoutes` moved to top-level `typedRoutes` in `next.config.ts`.
-- `next lint` was removed in Next 16. Use `eslint` directly. `eslint-config-next` requires ESLint 9 with flat config (`eslint.config.mjs`).
-- NextAuth's `auth/handlers/signIn/signOut` re-exports require explicit type annotation (`NextAuthResult[...]`) to avoid "type not portable" errors during Next's stricter type-check pass. See `apps/shell/src/auth.ts`.
-- Turbopack is the default builder. Module Federation tooling does not currently support it — another reason MFE is off the table for Next sub-apps.
-
-## 9. Containerization
-
-Both a root `Dockerfile` (monorepo-aware, parameterized by `APP` build-arg, uses `turbo prune --docker`) and a per-app `apps/shell/Dockerfile` (same pattern hard-coded to `shell`) exist. Day-to-day dev runs `npm run dev` directly — Docker is only for production-build validation and deployment. `docker-compose.yml` wires the shell up for local container smoke tests.
-
-### Hosting an in-monorepo SPA
-
-An SPA in `apps/<name>/` is just a static bundle after build. The load-bearing constraint (§1): the SPA must be reachable **through the shell origin** (`shell.example.com/myapp/*`), not on a different public origin. Different origin = cookie not scoped = OAuth round-trips on every navigation = the architecture's whole reason for existing is defeated.
-
-Three options, in order of operational complexity:
-
-1. **Bundle into the shell container.** Build the SPA in the same Docker stage, ship its `dist/` inside the shell image (e.g. under `apps/shell/public/myapp/`, or behind a Next route handler that does SPA fallback and can also do the first-paint user injection from §2). One container, one deploy. Loses independent deploy cadence — fine if you don't need it.
-2. **Separate static container, shell rewrites to it.** Tiny nginx/caddy container hosts the bundle on an internal port; uncomment the rewrite stub in `apps/shell/next.config.ts` to proxy `/myapp/*` to it. Two containers in `docker-compose.yml`. Independent deploy.
-3. **Static hosting elsewhere** (S3+CloudFront, Cloudflare Pages, etc.). Push the bundle, shell rewrites to its URL. CDN edge for free, nothing to operate.
-
-Default to (1) until a real reason to graduate appears.
+| Next.js for the shell | Not using SSR, RSC, App Router, or middleware — paying for the framework without its value prop. Static SPA + nginx is the simpler match. |
+| NextAuth as the auth model | Builds a server-side session-cookie tier this architecture doesn't need. MSAL.js in the browser is the direct fit for SPA-only stacks. |
+| BFF proxy as default for API calls | Permanent Node passthrough in the hot path of every API call. JWKS validation per API is the standard pattern and removes the shell from the request path. |
+| Tokens hidden server-side (HTTP-only cookie, no browser exposure) | Considered. Internal-suite threat model accepts in-memory `sessionStorage` tokens in exchange for shell out of the API hot path. Revisit if threat model changes. |
+| Module Federation | Operational complexity, version-skew failure modes, Vite/Turbopack incompatibility — not the problem we have. |
+| `file:` deps / `npm link` / module-fed for dev | Fragile in CI, requires sibling-checkout discipline. |
+| Iframes per sub-app | Layout/focus/scroll, UX feel. |
+| npm registry publishing | No registry infrastructure to maintain; subtree handles cross-repo cases. |
+| `packages/config` for a shared apps list | The apps list comes from `/api/apps`; no shared package needed. |
+| Per-app subdomains | Breaks shared `sessionStorage` cross-app, breaks single-redirect-URI ergonomics, adds CORS overhead. Single origin is load-bearing (§1). |
+| MSAL only in the shell, sub-apps delegating via postMessage / iframes | Reinvents what MSAL already does at the browser level. Sub-apps use `@repo/auth` (which wraps MSAL) directly; the "shell-mediated" part is just the callback URI. |
+| docker-compose in production | Each deployable is its own Container App. Compose is for one-off local integration testing only. |
 
 ## 10. Forward-looking decisions (when to revisit)
 
-- **Build `packages/ui-elements`** when a non-React consumer or a zero-coupling consumer appears. Not before.
-- **Move the apps list to a DB-backed source** when the catalog grows beyond what makes sense to hand-edit, or when per-tenant/per-user filtering becomes a real need.
-- **Implement real `validateSession` and `withAuth`** in `@repo/auth` when a sub-app or non-Next service first needs them. Today the shell uses `auth()` directly from NextAuth in its API routes.
-- **Add a CI job in the dashboard repo** (or whatever the first subtree consumer is) that opens a PR when this repo updates the components. Cadence policy is TBD.
+- **Build `packages/ui-elements`** when a non-React consumer appears. Not before.
+- **Build the runtime auth SDK** (`shell.example.com/auth-sdk.js`) when a zero-coupling consumer needs auth without compiling `packages/auth`. Not before.
+- **Add an external subtree consumer** when the first separate-repo SPA materializes. Then revisit whether subtree-update cadence needs automation.
+- **Promote `/api/apps` from in-memory to DB-backed** when the catalog grows beyond what makes sense to hand-edit, or when per-tenant/per-user filtering becomes a real need.
+- **Add a Front Door / edge CDN tier** if `nginx` becomes a single-instance bottleneck or global latency starts to matter. The routing config maps directly; nothing about the architecture forces a change.
